@@ -387,6 +387,23 @@ int PTZBindingService::Stop(_tptz__Stop *tptz__Stop, _tptz__StopResponse &tptz__
     return SOAP_OK;
 }
 
+int PTZBindingService::AbsoluteMove(_tptz__AbsoluteMove *req, _tptz__AbsoluteMoveResponse &res)
+{
+    float pan = 0.0f;
+    float tilt = 0.0f;
+
+    if (req->Position && req->Position->PanTilt) {
+        pan = req->Position->PanTilt->x * 90.0f;   // 예: 0.0 ~ 1.0 → 0~90도
+        tilt = req->Position->PanTilt->y * 180.0f;
+    }
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "curl -s http://127.0.0.1:7777/rotatePT/%.0f/%.0f", pan, tilt);
+    system(cmd);
+
+    return SOAP_OK;
+}
+
 
 
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetServiceCapabilities)
@@ -399,7 +416,7 @@ SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurationOptions)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetHomePosition)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SendAuxiliaryCommand)
-SOAP_EMPTY_HANDLER(PTZBindingService, tptz, AbsoluteMove)
+//SOAP_EMPTY_HANDLER(PTZBindingService, tptz, AbsoluteMove)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTours)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTour)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTourOptions)
