@@ -12,6 +12,7 @@
 #include "smacros.h"
 #include "stools.h"
 #include <iostream>
+#include <fstream>
 
 #define LOG_REQUEST(name) std::cout << "[PTZ] " << name << " called" << std::endl;
 
@@ -438,16 +439,55 @@ int PTZBindingService::GetConfiguration(
     return SOAP_OK;
 }
 
+int PTZBindingService::SetPreset(
+    _tptz__SetPreset* req,
+    _tptz__SetPresetResponse& res)
+{
+    LOG_REQUEST("SetPreset");
+
+    if (!req || !req->PresetToken) return SOAP_OK;
+
+    std::cout << "  PresetToken: " << *(req->PresetToken) << std::endl;
+
+    // 예시: 프리셋 저장
+    std::ofstream presetFile("/tmp/preset_" + *(req->PresetToken) + ".txt");
+    if (presetFile.is_open()) {
+        presetFile << "Pan: 30\nTilt: 50\n";  // 임시 저장 예시
+        presetFile.close();
+    }
+
+    res.PresetToken = soap_strdup(soap, req->PresetToken->c_str());
+
+    return SOAP_OK;
+}
+
+int PTZBindingService::SetHomePosition(
+    _tptz__SetHomePosition* req,
+    _tptz__SetHomePositionResponse& res)
+{
+    LOG_REQUEST("SetHomePosition");
+
+    float pan = 0.0f;
+    float tilt = 0.0f;
+
+    std::ofstream homeFile("/tmp/ptz_home.txt");
+    if (homeFile.is_open()) {
+        homeFile << pan << " " << tilt;
+        homeFile.close();
+    }
+
+    return SOAP_OK;
+}
 
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetServiceCapabilities)
 // SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurations)
-SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetPreset)
+// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetPreset)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, RemovePreset)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetStatus)
 // SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurationOptions)
-SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetHomePosition)
+// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetHomePosition)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SendAuxiliaryCommand)
 //SOAP_EMPTY_HANDLER(PTZBindingService, tptz, AbsoluteMove)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTours)
