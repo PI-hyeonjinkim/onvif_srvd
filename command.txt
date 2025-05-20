@@ -1,0 +1,45 @@
+sudo tcpdump -i eth0 port 3702
+
+ps aux | grep onvif_srvd
+
+
+cd repo_dir
+cmake -B build . -DUSE_GSOAP_STATIC_LIB=1
+cmake --build build
+
+
+sudo ./onvif_srvd \
+  --ifs eth0 \
+  --name JetsonONVIF \
+  --width 1280 --height 720 \
+  --url rtsp://192.168.33.13:8554/mystream \
+  --type H264 \
+  --scope onvif://www.onvif.org/Profile/Streaming
+
+cd repo_dir
+cmake -B build . -DUSE_GSOAP_STATIC_LIB=1
+cmake --build build
+
+./wsdd \
+  --if_name eth0 \
+  --type tdn:NetworkVideoTransmitter \
+  --xaddr http://%s:1000/onvif/device_service \
+  --scope "onvif://www.onvif.org/name/JetsonONVIF onvif://www.onvif.org/Profile/Streaming"
+
+
+
+sudo ./onvif_srvd \
+  --ifs eth0 \
+  --name JetsonPTZ \
+  --width 1280 --height 720 \
+  --url rtsp://192.168.33.13:8554/mystream \
+  --type H264 \
+  --scope onvif://www.onvif.org/Profile/Streaming \
+  --ptz \
+  --move_left "curl http://127.0.0.1:7777/rotatePT/0/0" \
+  --move_right "curl http://127.0.0.1:7777/rotatePT/0/90" \
+  --move_up "curl http://127.0.0.1:7777/rotatePT/90/90" \
+  --move_down curl http://127.0.0.1:7777/rotatePT/50/50" \
+  --move_stop "curl http://127.0.0.1:7777/rotatePT/30/30" \
+  --move_preset "curl http://localhost:7777/goto/%t" \
+  --no_fork --no_close
