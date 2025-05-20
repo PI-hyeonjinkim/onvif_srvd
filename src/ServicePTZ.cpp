@@ -11,7 +11,9 @@
 #include "ServiceContext.h"
 #include "smacros.h"
 #include "stools.h"
-// #include <iostream>
+#include <iostream>
+
+#define LOG_REQUEST(name) std::cout << "[PTZ] " << name << " called" << std::endl;
 
 static int GetPTZPreset(struct soap *soap, tt__PTZPreset* ptzp, int number)
 {
@@ -33,9 +35,8 @@ static int GetPTZPreset(struct soap *soap, tt__PTZPreset* ptzp, int number)
 
 static int run_system_cmd(const char* cmd, unsigned int timeout_usec = 0)
 {
+    std::cout << "[CMD] system call: " << cmd << std::endl;
     int ret = system(cmd);
-
-    DEBUG_MSG("PTZ cmd:%s  ret:%d\n", cmd, ret);
 
     if(timeout_usec)
         usleep(timeout_usec);
@@ -77,7 +78,7 @@ int PTZBindingService::GotoPreset(
 {
     UNUSED(tptz__GotoPresetResponse);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-
+    LOG_REQUEST("GotoPreset");
 
     std::string preset_cmd;
 
@@ -244,7 +245,7 @@ int PTZBindingService::GotoHomePosition(
     UNUSED(tptz__GotoHomePosition);
     UNUSED(tptz__GotoHomePositionResponse);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-
+    LOG_REQUEST("GotoHomePosition");
     std::string preset_cmd;
 	
     auto ctx = (ServiceContext*)soap->user;
@@ -288,7 +289,7 @@ int PTZBindingService::ContinuousMove(
     UNUSED(tptz__ContinuousMoveResponse);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
 
-
+    LOG_REQUEST("ContinuousMove");
     auto ctx = (ServiceContext*)soap->user;
 
     if (!tptz__ContinuousMove)
@@ -330,6 +331,7 @@ int PTZBindingService::RelativeMove(
 {
     UNUSED(tptz__RelativeMoveResponse);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+    LOG_REQUEST("RelativeMove");
 
 
     auto ctx = (ServiceContext*)soap->user;
@@ -376,6 +378,7 @@ int PTZBindingService::Stop(_tptz__Stop *tptz__Stop, _tptz__StopResponse &tptz__
     UNUSED(tptz__Stop);
     UNUSED(tptz__StopResponse);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+    LOG_REQUEST("Stop");
 
     auto ctx = (ServiceContext*)soap->user;
 
@@ -389,14 +392,16 @@ int PTZBindingService::AbsoluteMove(_tptz__AbsoluteMove *req, _tptz__AbsoluteMov
     float pan = 0.0f;
     float tilt = 0.0f;
 
+    LOG_REQUEST("AbsoluteMove");
+
     if (req->Position && req->Position->PanTilt) {
         pan = req->Position->PanTilt->x * 90.0f;   // 예: 0.0 ~ 1.0 → 0~90도
         tilt = req->Position->PanTilt->y * 180.0f;
     }
 
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "curl -s http://127.0.0.1:7777/rotatePT/%.0f/%.0f", pan, tilt);
-    system(cmd);
+    // snprintf(cmd, sizeof(cmd), "curl -s http://127.0.0.1:7777/rotatePT/%.0f/%.0f", pan, tilt);
+    // system(cmd);
     return SOAP_OK;
 }
 
