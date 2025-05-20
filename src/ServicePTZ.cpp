@@ -445,21 +445,50 @@ int PTZBindingService::SetPreset(
 {
     LOG_REQUEST("SetPreset");
 
-    if (!req || !req->PresetToken) return SOAP_OK;
-
-    std::cout << "  PresetToken: " << *(req->PresetToken) << std::endl;
-
-    // 예시: 프리셋 저장
-    std::ofstream presetFile("/tmp/preset_" + *(req->PresetToken) + ".txt");
-    if (presetFile.is_open()) {
-        presetFile << "Pan: 30\nTilt: 50\n";  // 임시 저장 예시
-        presetFile.close();
+    if (!req) {
+        std::cerr << "❌ SetPreset: req is null" << std::endl;
+        return SOAP_FAULT;
     }
 
-    res.PresetToken = soap_strdup(soap, req->PresetToken->c_str());
+    if (!req->ProfileToken.empty())
+        std::cout << "  ProfileToken: " << req->ProfileToken << std::endl;
+
+    if (req->PresetName)
+        std::cout << "  PresetName: " << *(req->PresetName) << std::endl;
+    else
+        std::cout << "  PresetName is null" << std::endl;
+
+    if (req->PresetToken)
+        std::cout << "  PresetToken: " << *(req->PresetToken) << std::endl;
+    else
+        std::cout << "  PresetToken is null" << std::endl;
+
+    // PresetToken 필수로 가정하고 파일 저장
+    if (req->PresetToken) {
+        std::string filename = "/tmp/preset_" + *(req->PresetToken) + ".txt";
+        std::ofstream file(filename);
+        if (file.is_open()) {
+            file << "PresetToken=" << *(req->PresetToken) << "\n";
+            if (req->PresetName)
+                file << "PresetName=" << *(req->PresetName) << "\n";
+            file.close();
+            std::cout << "  ✅ Preset saved to " << filename << std::endl;
+        } else {
+            std::cerr << "  ❌ Failed to write to " << filename << std::endl;
+            return SOAP_FAULT;
+        }
+
+        // 응답용 PresetToken 설정
+        res.PresetToken = soap_strdup(soap, req->PresetToken->c_str());
+    } else {
+        std::cerr << "  ❌ PresetToken is required to save preset" << std::endl;
+        return SOAP_FAULT;
+    }
 
     return SOAP_OK;
 }
+
+#include <fstream>  // 꼭 포함되어야 합니다
 
 int PTZBindingService::SetHomePosition(
     _tptz__SetHomePosition* req,
@@ -467,13 +496,22 @@ int PTZBindingService::SetHomePosition(
 {
     LOG_REQUEST("SetHomePosition");
 
-    float pan = 0.0f;
-    float tilt = 0.0f;
+    // 입력 로그 출력
+    if (req && !req->ProfileToken.empty())
+        std::cout << "  ProfileToken: " << req->ProfileToken << std::endl;
+    else
+        std::cout << "  ProfileToken is missing" << std::endl;
 
-    std::ofstream homeFile("/tmp/ptz_home.txt");
-    if (homeFile.is_open()) {
-        homeFile << pan << " " << tilt;
-        homeFile.close();
+    // 예제 저장: 단순히 파일 생성
+    const std::string filename = "/tmp/ptz_home.txt";
+    std::ofstream file(filename);
+    if (file.is_open()) {
+        file << "HomePreset=1" << std::endl;  // 임시 값. 실제 포지션 정보를 저장하려면 AbsoluteMove와 연동 필요
+        file.close();
+        std::cout << "  ✅ Home position saved to " << filename << std::endl;
+    } else {
+        std::cerr << "  ❌ Failed to write to " << filename << std::endl;
+        return SOAP_FAULT;
     }
 
     return SOAP_OK;
