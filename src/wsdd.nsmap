@@ -1,0 +1,10 @@
+// wsdd.nsmap
+#include "stdsoap2.h"
+
+struct Namespace namespaces[] =
+{
+    {"SOAP-ENV", "http://www.w3.org/2003/05/soap-envelope", NULL},
+    {"wsa",      "http://schemas.xmlsoap.org/ws/2004/08/addressing", NULL},
+    {"wsdd",     "http://schemas.xmlsoap.org/ws/2005/04/discovery", NULL},
+    {NULL, NULL, NULL}
+};

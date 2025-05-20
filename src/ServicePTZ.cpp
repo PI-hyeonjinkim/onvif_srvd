@@ -11,10 +11,7 @@
 #include "ServiceContext.h"
 #include "smacros.h"
 #include "stools.h"
-
-
-
-
+// #include <iostream>
 
 static int GetPTZPreset(struct soap *soap, tt__PTZPreset* ptzp, int number)
 {
@@ -400,18 +397,49 @@ int PTZBindingService::AbsoluteMove(_tptz__AbsoluteMove *req, _tptz__AbsoluteMov
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "curl -s http://127.0.0.1:7777/rotatePT/%.0f/%.0f", pan, tilt);
     system(cmd);
+    return SOAP_OK;
+}
+
+int PTZBindingService::GetConfigurations(
+    _tptz__GetConfigurations* req,
+    _tptz__GetConfigurationsResponse& res)
+{
+    UNUSED(req);
+    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+
+    tt__PTZConfiguration* cfg = soap_new_tt__PTZConfiguration(soap);
+    cfg->token = "PTZConfigToken";
+    cfg->Name = soap_strdup(soap, "DefaultPTZConfig");
+    cfg->NodeToken = "PTZNodeToken";
+    cfg->UseCount = 1;
+
+    res.PTZConfiguration.push_back(cfg);
+    return SOAP_OK;
+}
+
+int PTZBindingService::GetConfiguration(
+    _tptz__GetConfiguration* req,
+    _tptz__GetConfigurationResponse& res)
+{
+    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+    UNUSED(req);
+
+    res.PTZConfiguration = soap_new_tt__PTZConfiguration(soap);
+    res.PTZConfiguration->token = "PTZConfigToken";
+    res.PTZConfiguration->Name = soap_strdup(soap, "DefaultPTZConfig");
+    res.PTZConfiguration->NodeToken = "PTZNodeToken";
+    res.PTZConfiguration->UseCount = 1;
 
     return SOAP_OK;
 }
 
 
-
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetServiceCapabilities)
-SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurations)
+// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurations)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetPreset)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, RemovePreset)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetStatus)
-SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfiguration)
+// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurationOptions)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetHomePosition)

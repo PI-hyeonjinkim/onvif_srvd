@@ -15,6 +15,7 @@
 #include "soapDeviceBindingService.h"
 #include "soapMediaBindingService.h"
 #include "soapPTZBindingService.h"
+#include "soapWSDiscoveryBindingService.h"  // ← 생성된 WS-Discovery 바인딩
 
 
 
@@ -178,6 +179,7 @@ static const struct option long_opts[] =
         APPLY(DeviceBindingService, soap)               \
         APPLY(MediaBindingService, soap)                \
         APPLY(PTZBindingService, soap)                  \
+        APPLY(WSDiscoveryBindingService, soap)  
 
 
 /*
@@ -516,6 +518,7 @@ int main(int argc, char *argv[])
 
     FOREACH_SERVICE(DECLARE_SERVICE, soap)
 
+    printf("✅ onvif_srvd started!\n");
     while( true )
     {
         // wait new client
