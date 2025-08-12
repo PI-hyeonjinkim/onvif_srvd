@@ -70,3 +70,15 @@ jetson@ubuntu:~/onvif_srvd/build$ ldd onvif_srvd
         /lib/ld-linux-aarch64.so.1 (0x0000007faa2e9000)
         libm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000007fa98e2000)
 jetson@ubuntu:~/onvif_srvd/build$
+
+
+
+sudo ./onvif_srvd \
+  --ifs eth0 \
+  --name JetsonPTZ \
+  --width 1280 --height 720 \
+  --url 'rtsp://%s:8554/mystream' \
+  --type H264 \
+  --scope onvif://www.onvif.org/Profile/Streaming \
+  --ptz \
+  --no_fork --no_close
