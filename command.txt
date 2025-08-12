@@ -1,12 +1,9 @@
 sudo tcpdump -i eth0 port 3702
-
 ps aux | grep onvif_srvd
-
 
 cd repo_dir
 cmake -B build . -DUSE_GSOAP_STATIC_LIB=1
 cmake --build build
-
 
 sudo ./onvif_srvd \
   --ifs eth0 \
@@ -26,8 +23,6 @@ cmake --build build
   --xaddr http://%s:1000/onvif/device_service \
   --scope "onvif://www.onvif.org/name/JetsonONVIF onvif://www.onvif.org/Profile/Streaming"
 
-
-
 sudo ./onvif_srvd \
   --ifs eth0 \
   --name JetsonPTZ \
@@ -39,7 +34,39 @@ sudo ./onvif_srvd \
   --move_left "curl http://127.0.0.1:7777/rotatePT/0/0" \
   --move_right "curl http://127.0.0.1:7777/rotatePT/0/90" \
   --move_up "curl http://127.0.0.1:7777/rotatePT/90/90" \
-  --move_down curl http://127.0.0.1:7777/rotatePT/50/50" \
+  --move_down "curl http://127.0.0.1:7777/rotatePT/50/50" \
   --move_stop "curl http://127.0.0.1:7777/rotatePT/30/30" \
   --move_preset "curl http://localhost:7777/goto/%t" \
   --no_fork --no_close
+
+
+
+sudo ./onvif_srvd \
+  --ifs eth0 \
+  --name JetsonPTZ \
+  --width 1280 --height 720 \
+  --url rtsp://192.168.33.13:8554/mystream \
+  --type H264 \
+  --scope onvif://www.onvif.org/Profile/Streaming \
+  --ptz \
+  --no_fork --no_close
+
+
+
+/home/jetson/onvif_srvd/build
+
+  ldd onvif_srvd
+  file onvif_srvd
+
+
+jetson@ubuntu:~/onvif_srvd/build$ file onvif_srvd
+onvif_srvd: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 3.7.0, BuildID[sha1]=010942d247e30ee0c779869870da0a651b969349, with debug_info, not stripped
+
+jetson@ubuntu:~/onvif_srvd/build$ ldd onvif_srvd
+        linux-vdso.so.1 (0x0000007faa315000)
+        libstdc++.so.6 => /usr/lib/aarch64-linux-gnu/libstdc++.so.6 (0x0000007fa9b18000)
+        libgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000007fa9af4000)
+        libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000007fa999b000)
+        /lib/ld-linux-aarch64.so.1 (0x0000007faa2e9000)
+        libm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000007fa98e2000)
+jetson@ubuntu:~/onvif_srvd/build$
