@@ -11,115 +11,122 @@
 #include "ServiceContext.h"
 #include "smacros.h"
 #include "stools.h"
-#include <iostream>
+
+#include <string>
+#include <map>
+#include <mutex>
 #include <fstream>
+#include <sstream>
+#include <sys/stat.h>
+#include <algorithm>
+#include <stdlib.h>
+#include <unistd.h>
 
-#define LOG_REQUEST(name) std::cout << "[PTZ] " << name << " called" << std::endl;
+// ===== 장비 범위 (필요 시 조정) =====
+static const float PAN_MIN  = 0.0f, PAN_MAX  = 180.0f;
+static const float TILT_MIN = 0.0f, TILT_MAX = 180.0f;
+static const float REL_SCALE_PAN  = 45.0f;  // 예: 0.5 → +22.5도
+static const float REL_SCALE_TILT = 45.0f;
+// ===== 프리셋 저장 위치 =====
+static const char* PRESET_DB_DIR  = "/var/lib/onvif_srvd";
+static const char* PRESET_DB_PATH = "/var/lib/onvif_srvd/presets.txt";
 
-static int GetPTZPreset(struct soap *soap, tt__PTZPreset* ptzp, int number)
-{
-    ptzp->token = soap_new_std_string(soap, std::to_string(number));
-    ptzp->Name  = soap_new_std_string(soap, std::to_string(number));
-
-
-    ptzp->PTZPosition = soap_new_req_tt__PTZVector(soap);
-    if(!ptzp->PTZPosition)
-        return SOAP_FAULT;
-
-    ptzp->PTZPosition->PanTilt = soap_new_req_tt__Vector2D(soap, 0.0f, 0.0f);
-    ptzp->PTZPosition->Zoom    = soap_new_req_tt__Vector1D(soap, 1.0f);
-
-    return SOAP_OK;
+// ===== 유틸 =====
+static inline float clampf(float v, float lo, float hi) {
+    return std::max(lo, std::min(hi, v));
 }
 
 
+static void ensure_preset_dir() {
+    struct stat st{};
+    if (stat(PRESET_DB_DIR, &st) != 0) {
+        mkdir(PRESET_DB_DIR, 0755);
+    }
+}
 
+// run_system_cmd: 선언/정의 한 번만 (기본인자 정의부에만 두면 -fpermissive 회피)
 static int run_system_cmd(const char* cmd, unsigned int timeout_usec = 0)
 {
-    std::cout << "[CMD] system call: " << cmd << std::endl;
     int ret = system(cmd);
-
-    if(timeout_usec)
-        usleep(timeout_usec);
-
+    DEBUG_MSG("PTZ cmd:%s  ret:%d\n", cmd, ret);
+    if (timeout_usec) usleep(timeout_usec);
     return ret;
 }
+// ===== 현재 각도(누적) 상태 =====
+static std::mutex g_pose_mtx;
+static float g_cur_pan  = 0.0f;  // onvif_srvd 시작 시 카메라도 (0,0)이라 가정
+static float g_cur_tilt = 0.0f;
 
+static void set_current_pt(float pan, float tilt) {
+    std::lock_guard<std::mutex> lk(g_pose_mtx);
+    g_cur_pan  = clampf(pan,  PAN_MIN,  PAN_MAX);
+    g_cur_tilt = clampf(tilt, TILT_MIN, TILT_MAX);
+}
 
+static void get_current_pt(float& pan, float& tilt) {
+    std::lock_guard<std::mutex> lk(g_pose_mtx);
+    pan = g_cur_pan; tilt = g_cur_tilt;
+}
 
-int PTZBindingService::GetPresets(
-    _tptz__GetPresets         *tptz__GetPresets,
-    _tptz__GetPresetsResponse &tptz__GetPresetsResponse)
-{
-    UNUSED(tptz__GetPresets);
-    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-
-
-    soap_default_std__vectorTemplateOfPointerTott__PTZPreset(
-        soap, &tptz__GetPresetsResponse._tptz__GetPresetsResponse::Preset);
-
-    for (int i = 0; i < 8; i++)
-    {
-        tt__PTZPreset* ptzp = soap_new_tt__PTZPreset(soap);
-
-        if(!ptzp || GetPTZPreset(soap, ptzp, i))
-            return SOAP_FAULT;
-
-        tptz__GetPresetsResponse.Preset.emplace_back(ptzp);
-    }
-
-    return SOAP_OK;
+static void adjust_current_pt(float dpan, float dtilt) {
+    std::lock_guard<std::mutex> lk(g_pose_mtx);
+    g_cur_pan  = clampf(g_cur_pan  + dpan,  PAN_MIN,  PAN_MAX);
+    g_cur_tilt = clampf(g_cur_tilt + dtilt, TILT_MIN, TILT_MAX);
 }
 
 
+static void goto_current_pt() {
+    float pan, tilt;
+    get_current_pt(pan, tilt);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "curl -s http://127.0.0.1:7777/rotatePT/%.0f/%.0f", pan, tilt);
+    run_system_cmd(cmd, 0);
+    DEBUG_MSG("PTZ[MOVE]: goto pan=%.2f tilt=%.2f\n", pan, tilt);
+}
+// ===== 프리셋 저장소 =====
+struct PresetRec {
+    float pan, tilt, zoom;
+    std::string name;
+    PresetRec() : pan(0), tilt(0), zoom(1), name() {}
+};
 
-int PTZBindingService::GotoPreset(
-    _tptz__GotoPreset         *tptz__GotoPreset,
-    _tptz__GotoPresetResponse &tptz__GotoPresetResponse)
-{
-    UNUSED(tptz__GotoPresetResponse);
-    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-    LOG_REQUEST("GotoPreset");
+static std::mutex g_preset_mtx;
+static std::map<std::string, PresetRec> g_presets; // token -> record
 
-    std::string preset_cmd;
+static void load_presets_from_file() {
+    std::lock_guard<std::mutex> lock(g_preset_mtx);
+    g_presets.clear();
+    std::ifstream fin(PRESET_DB_PATH);
+    if (!fin.is_open()) return;
 
-    auto ctx = (ServiceContext*)soap->user;
-
-    if (!tptz__GotoPreset)
-        return SOAP_OK;
-
-    if (tptz__GotoPreset->ProfileToken.empty())
-        return SOAP_OK;
-
-    if (tptz__GotoPreset->PresetToken.empty())
-        return SOAP_OK;
-
-
-    if (!ctx->get_ptz_node()->get_move_preset().empty())
-    {
-        preset_cmd = ctx->get_ptz_node()->get_move_preset();
-    } else
-    {
-        return SOAP_OK;
+    std::string token, name;
+    float pan, tilt, zoom;
+    // 한 줄 포맷: token pan tilt zoom name(공백X)
+    while (fin >> token >> pan >> tilt >> zoom >> name) {
+        PresetRec rec;
+        rec.pan = pan; rec.tilt = tilt; rec.zoom = zoom; rec.name = name;
+        g_presets[token] = rec;
     }
-
-    std::string template_str_t("%t");
-
-    auto it_t = preset_cmd.find(template_str_t, 0);
-
-    if( it_t != std::string::npos )
-    {
-        preset_cmd.replace(it_t, template_str_t.size(), tptz__GotoPreset->PresetToken.c_str());
-    }
-
-    run_system_cmd(preset_cmd.c_str());
-
-    return SOAP_OK;
 }
 
+static void save_presets_to_file() {
+    std::lock_guard<std::mutex> lock(g_preset_mtx);
+    ensure_preset_dir();
+    std::ofstream fout(PRESET_DB_PATH, std::ios::trunc);
+    if (!fout.is_open()) return;
 
+    for (std::map<std::string, PresetRec>::const_iterator it = g_presets.begin();
+         it != g_presets.end(); ++it) {
+        const std::string &t = it->first;
+        const PresetRec  &r = it->second;
+        std::string safe_name = r.name.empty() ? t : r.name; // 공백 없는 이름 권장
+        fout << t << " " << r.pan << " " << r.tilt << " " << r.zoom << " " << safe_name << "\n";
+    }
+}
 
-int GetPTZNode(struct soap *soap, tt__PTZNode* ptzn)
+// ===== PTZ 노드/스페이스 (기존 유지, 프리셋 최대치만 확대) =====
+static int GetPTZNode(struct soap *soap, tt__PTZNode* ptzn)
 {
     if(!soap || !ptzn)
         return SOAP_FAULT;
@@ -138,71 +145,56 @@ int GetPTZNode(struct soap *soap, tt__PTZNode* ptzn)
     soap_default_std__vectorTemplateOfPointerTott__Space1DDescription(soap, &ptzn->SupportedPTZSpaces->tt__PTZSpaces::PanTiltSpeedSpace);
     soap_default_std__vectorTemplateOfPointerTott__Space1DDescription(soap, &ptzn->SupportedPTZSpaces->tt__PTZSpaces::ZoomSpeedSpace);
 
-
-    auto ptzs1 = soap_new_tt__Space2DDescription(soap);
-    if(ptzs1)
-    {
+    tt__Space2DDescription* ptzs1 = soap_new_tt__Space2DDescription(soap);
+    if(ptzs1) {
         ptzs1->URI         = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationGenericSpace";
         ptzs1->XRange      = soap_new_req_tt__FloatRange(soap, -1.0f, 1.0f);
         ptzs1->YRange      = soap_new_req_tt__FloatRange(soap, -1.0f, 1.0f);
     }
     ptzn->SupportedPTZSpaces->RelativePanTiltTranslationSpace.emplace_back(ptzs1);
 
-
-    auto ptzs2 = soap_new_tt__Space1DDescription(soap);
-    if(ptzs2)
-    {
+    tt__Space1DDescription* ptzs2 = soap_new_tt__Space1DDescription(soap);
+    if(ptzs2) {
         ptzs2->URI         = "http://www.onvif.org/ver10/tptz/ZoomSpaces/TranslationGenericSpace";
         ptzs2->XRange      = soap_new_req_tt__FloatRange(soap, -1.0f, 1.0f);
     }
     ptzn->SupportedPTZSpaces->RelativeZoomTranslationSpace.emplace_back(ptzs2);
 
-
-    auto ptzs3 = soap_new_tt__Space2DDescription(soap);
-    if(ptzs3)
-    {
+    tt__Space2DDescription* ptzs3 = soap_new_tt__Space2DDescription(soap);
+    if(ptzs3) {
         ptzs3->URI         = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace";
         ptzs3->XRange      = soap_new_req_tt__FloatRange(soap, -1.0f, 1.0f);
         ptzs3->YRange      = soap_new_req_tt__FloatRange(soap, -1.0f, 1.0f);
     }
     ptzn->SupportedPTZSpaces->ContinuousPanTiltVelocitySpace.emplace_back(ptzs3);
 
-
-    auto ptzs4 = soap_new_tt__Space1DDescription(soap);
-    if(ptzs4)
-    {
+    tt__Space1DDescription* ptzs4 = soap_new_tt__Space1DDescription(soap);
+    if(ptzs4) {
         ptzs4->URI         = "http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace";
         ptzs4->XRange      = soap_new_req_tt__FloatRange(soap, -1.0f, 1.0f);
     }
     ptzn->SupportedPTZSpaces->ContinuousZoomVelocitySpace.emplace_back(ptzs4);
 
-
-    auto ptzs5 = soap_new_tt__Space1DDescription(soap);
-    if(ptzs5)
-    {
+    tt__Space1DDescription* ptzs5 = soap_new_tt__Space1DDescription(soap);
+    if(ptzs5) {
         ptzs5->URI         = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/GenericSpeedSpace";
         ptzs5->XRange      = soap_new_req_tt__FloatRange(soap, 0.0f, 1.0f);
     }
     ptzn->SupportedPTZSpaces->PanTiltSpeedSpace.emplace_back(ptzs5);
 
-
-    auto ptzs6 = soap_new_tt__Space1DDescription(soap);
-    if(ptzs6)
-    {
+    tt__Space1DDescription* ptzs6 = soap_new_tt__Space1DDescription(soap);
+    if(ptzs6) {
         ptzs6->URI         = "http://www.onvif.org/ver10/tptz/ZoomSpaces/ZoomGenericSpeedSpace";
         ptzs6->XRange      = soap_new_req_tt__FloatRange(soap, 0.0f, 1.0f);
     }
     ptzn->SupportedPTZSpaces->ZoomSpeedSpace.emplace_back(ptzs6);
 
-
-    ptzn->MaximumNumberOfPresets = 8;
+    ptzn->MaximumNumberOfPresets = 64; // 파일 기반이므로 충분히 크게
     ptzn->HomeSupported          = true;
     ptzn->FixedHomePosition      = soap_new_ptr(soap, true);
 
     return SOAP_OK;
 }
-
-
 
 int PTZBindingService::GetNodes(
     _tptz__GetNodes         *tptz__GetNodes,
@@ -210,7 +202,6 @@ int PTZBindingService::GetNodes(
 {
     UNUSED(tptz__GetNodes);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-
 
     soap_default_std__vectorTemplateOfPointerTott__PTZNode(
         soap, &tptz__GetNodesResponse._tptz__GetNodesResponse::PTZNode);
@@ -221,8 +212,6 @@ int PTZBindingService::GetNodes(
 
     return SOAP_OK;
 }
-
-
 
 int PTZBindingService::GetNode(
     _tptz__GetNode         *tptz__GetNode,
@@ -237,297 +226,210 @@ int PTZBindingService::GetNode(
     return SOAP_OK;
 }
 
-
-
-int PTZBindingService::GotoHomePosition(
-    _tptz__GotoHomePosition         *tptz__GotoHomePosition,
-    _tptz__GotoHomePositionResponse &tptz__GotoHomePositionResponse)
+// ===== 프리셋 목록 =====
+int PTZBindingService::GetPresets(
+    _tptz__GetPresets         *tptz__GetPresets,
+    _tptz__GetPresetsResponse &tptz__GetPresetsResponse)
 {
-    UNUSED(tptz__GotoHomePosition);
-    UNUSED(tptz__GotoHomePositionResponse);
+    UNUSED(tptz__GetPresets);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-    LOG_REQUEST("GotoHomePosition");
-    std::string preset_cmd;
-	
-    auto ctx = (ServiceContext*)soap->user;
 
-    if (!tptz__GotoHomePosition)
-        return SOAP_OK;
+    load_presets_from_file();
 
-    if (tptz__GotoHomePosition->ProfileToken.empty())
-        return SOAP_OK;
+    soap_default_std__vectorTemplateOfPointerTott__PTZPreset(
+        soap, &tptz__GetPresetsResponse._tptz__GetPresetsResponse::Preset);
 
+    std::lock_guard<std::mutex> lock(g_preset_mtx);
+    for (std::map<std::string, PresetRec>::const_iterator it = g_presets.begin();
+         it != g_presets.end(); ++it) {
+        const std::string &token = it->first;
+        const PresetRec   &p     = it->second;
 
-    if (!ctx->get_ptz_node()->get_move_preset().empty())
-    {
-        preset_cmd = ctx->get_ptz_node()->get_move_preset();
+        tt__PTZPreset* ptzp = soap_new_tt__PTZPreset(soap);
+        ptzp->token = soap_new_std_string(soap, token);
+        ptzp->Name  = soap_new_std_string(soap, p.name.empty()? token : p.name);
+
+        ptzp->PTZPosition = soap_new_req_tt__PTZVector(soap);
+        ptzp->PTZPosition->PanTilt = soap_new_req_tt__Vector2D(soap, p.pan, p.tilt);
+        ptzp->PTZPosition->Zoom    = soap_new_req_tt__Vector1D(soap, p.zoom);
+
+        tptz__GetPresetsResponse.Preset.emplace_back(ptzp);
     }
-    else
-    {
-        return SOAP_OK;
-    }
-
-    std::string template_str_t("%t");
-
-    auto it_t = preset_cmd.find(template_str_t, 0);
-
-    if( it_t != std::string::npos )
-    {
-        preset_cmd.replace(it_t, template_str_t.size(), "1");
-    }
-
-    run_system_cmd(preset_cmd.c_str());
-
     return SOAP_OK;
 }
 
+// ===== 프리셋 저장 (현재각 저장) =====
+int PTZBindingService::SetPreset(
+    _tptz__SetPreset         *tptz__SetPreset,
+    _tptz__SetPresetResponse &tptz__SetPresetResponse)
+{
+    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+    if (!tptz__SetPreset || tptz__SetPreset->ProfileToken.empty())
+        return SOAP_OK;
 
+    load_presets_from_file();
 
+    // 토큰 결정 (요청 없으면 자동 발급: 1,2,3,...)
+    std::string token;
+    if (tptz__SetPreset->PresetToken && !tptz__SetPreset->PresetToken->empty())
+        token = *tptz__SetPreset->PresetToken;
+    else {
+        std::lock_guard<std::mutex> lock(g_preset_mtx);
+        int next_id = 1;
+        while (g_presets.count(std::to_string(next_id))) ++next_id;
+        token = std::to_string(next_id);
+    }
+
+    // 현재각 저장
+    PresetRec cur;
+    get_current_pt(cur.pan, cur.tilt);
+    cur.zoom = 1.0f;
+    if (tptz__SetPreset->PresetName && !tptz__SetPreset->PresetName->empty())
+        cur.name = *tptz__SetPreset->PresetName;
+
+    {
+        std::lock_guard<std::mutex> lock(g_preset_mtx);
+        g_presets[token] = cur;
+        save_presets_to_file();
+    }
+
+    tptz__SetPresetResponse.PresetToken = token;
+    return SOAP_OK;
+}
+
+int PTZBindingService::RemovePreset(
+    _tptz__RemovePreset         *tptz__RemovePreset,
+    _tptz__RemovePresetResponse &tptz__RemovePresetResponse)
+{
+    UNUSED(tptz__RemovePresetResponse);
+    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+
+    if (!tptz__RemovePreset ||
+        tptz__RemovePreset->ProfileToken.empty() ||
+        tptz__RemovePreset->PresetToken.empty())
+        return SOAP_OK;
+
+    load_presets_from_file();
+    {
+        std::lock_guard<std::mutex> lock(g_preset_mtx);
+        g_presets.erase(tptz__RemovePreset->PresetToken); // 값 타입 그대로 사용
+        save_presets_to_file();
+    }
+    return SOAP_OK;
+}
+// ===== 프리셋 이동 =====
+int PTZBindingService::GotoPreset(
+    _tptz__GotoPreset         *tptz__GotoPreset,
+    _tptz__GotoPresetResponse &tptz__GotoPresetResponse)
+{
+    UNUSED(tptz__GotoPresetResponse);
+    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+
+    if (!tptz__GotoPreset ||
+        tptz__GotoPreset->ProfileToken.empty() ||
+        tptz__GotoPreset->PresetToken.empty())
+        return SOAP_OK;
+
+    load_presets_from_file();
+    PresetRec rec;
+    {
+        std::lock_guard<std::mutex> lock(g_preset_mtx);
+        std::map<std::string, PresetRec>::const_iterator it =
+            g_presets.find(tptz__GotoPreset->PresetToken); // 값 타입
+        if (it == g_presets.end()) {
+            DEBUG_MSG("PTZ: preset not found: %s\n",
+                      tptz__GotoPreset->PresetToken.c_str());
+            return SOAP_OK;
+        }
+        rec = it->second;
+    }
+
+    set_current_pt(rec.pan, rec.tilt);
+    goto_current_pt();
+    return SOAP_OK;
+}
+// ===== 홈 포지션 (0,0) =====
+int PTZBindingService::GotoHomePosition(
+    _tptz__GotoHomePosition         *req,
+    _tptz__GotoHomePositionResponse &res)
+{
+    UNUSED(res);
+    if (!req || req->ProfileToken.empty()) return SOAP_OK;
+    set_current_pt(0.0f, 0.0f);
+    goto_current_pt();
+    return SOAP_OK;
+}
+
+// ===== AbsoluteMove (절대 이동) =====
+int PTZBindingService::AbsoluteMove(
+    _tptz__AbsoluteMove         *req,
+    _tptz__AbsoluteMoveResponse &res)
+{
+    UNUSED(res);
+    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
+
+    if (!req || req->ProfileToken.empty()) return SOAP_OK;
+    if (!req->Position || !req->Position->PanTilt) return SOAP_OK;
+
+    const float pan  = req->Position->PanTilt->x;
+    const float tilt = req->Position->PanTilt->y;
+
+    set_current_pt(pan, tilt);
+    goto_current_pt();
+    return SOAP_OK;
+}
+
+// ===== 사용 안 하는 핸들러는 비워두기 =====
 int PTZBindingService::ContinuousMove(
     _tptz__ContinuousMove         *tptz__ContinuousMove,
     _tptz__ContinuousMoveResponse &tptz__ContinuousMoveResponse)
 {
+    UNUSED(tptz__ContinuousMove);
     UNUSED(tptz__ContinuousMoveResponse);
-    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-
-    LOG_REQUEST("ContinuousMove");
-    auto ctx = (ServiceContext*)soap->user;
-
-    if (!tptz__ContinuousMove)
-        return SOAP_OK;
-
-    if (!tptz__ContinuousMove->Velocity)
-        return SOAP_OK;
-
-    if (!tptz__ContinuousMove->Velocity->PanTilt)
-        return SOAP_OK;
-
-
-    if (tptz__ContinuousMove->Velocity->PanTilt->x > 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_right().c_str());
-    }
-    else if (tptz__ContinuousMove->Velocity->PanTilt->x < 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_left().c_str());
-    }
-
-    if (tptz__ContinuousMove->Velocity->PanTilt->y > 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_up().c_str());
-    }
-    else if (tptz__ContinuousMove->Velocity->PanTilt->y < 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_down().c_str());
-    }
-
+    DEBUG_MSG("PTZ: %s (unused)\n", __FUNCTION__);
     return SOAP_OK;
 }
-
-
 
 int PTZBindingService::RelativeMove(
-    _tptz__RelativeMove         *tptz__RelativeMove,
-    _tptz__RelativeMoveResponse &tptz__RelativeMoveResponse)
+    _tptz__RelativeMove         *req,
+    _tptz__RelativeMoveResponse &res)
 {
-    UNUSED(tptz__RelativeMoveResponse);
+    UNUSED(res);
     DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-    LOG_REQUEST("RelativeMove");
 
+    if (!req || req->ProfileToken.empty()) return SOAP_OK;
+    if (!req->Translation || !req->Translation->PanTilt) return SOAP_OK;
 
-    auto ctx = (ServiceContext*)soap->user;
+    const float rx = req->Translation->PanTilt->x;  // -1 ~ +1
+    const float ry = req->Translation->PanTilt->y;
 
-    if (!tptz__RelativeMove)
-        return SOAP_OK;
+    const float dpan  = rx * REL_SCALE_PAN;
+    const float dtilt = ry * REL_SCALE_TILT;
 
-    if (!tptz__RelativeMove->Translation)
-        return SOAP_OK;
-
-    if (!tptz__RelativeMove->Translation->PanTilt)
-        return SOAP_OK;
-
-
-    if (tptz__RelativeMove->Translation->PanTilt->x > 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_right().c_str(), 300000);
-        run_system_cmd(ctx->get_ptz_node()->get_move_stop().c_str());
+    if (dpan != 0.0f || dtilt != 0.0f) {
+        adjust_current_pt(dpan, dtilt);  // 누적/클램프
+        goto_current_pt();               // 절대 이동 호출
+        DEBUG_MSG("PTZ[REL]: rx=%.3f ry=%.3f -> dpan=%.2f dtilt=%.2f\n", rx, ry, dpan, dtilt);
     }
-    else if (tptz__RelativeMove->Translation->PanTilt->x < 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_left().c_str(), 300000);
-        run_system_cmd(ctx->get_ptz_node()->get_move_stop().c_str());
-    }
-
-    if (tptz__RelativeMove->Translation->PanTilt->y > 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_up().c_str(), 300000);
-        run_system_cmd(ctx->get_ptz_node()->get_move_stop().c_str());
-    }
-    else if (tptz__RelativeMove->Translation->PanTilt->y < 0)
-    {
-        run_system_cmd(ctx->get_ptz_node()->get_move_down().c_str(), 300000);
-        run_system_cmd(ctx->get_ptz_node()->get_move_stop().c_str());
-    }
-
     return SOAP_OK;
 }
-
-
-
 int PTZBindingService::Stop(_tptz__Stop *tptz__Stop, _tptz__StopResponse &tptz__StopResponse)
 {
     UNUSED(tptz__Stop);
     UNUSED(tptz__StopResponse);
-    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-    LOG_REQUEST("Stop");
-
-    auto ctx = (ServiceContext*)soap->user;
-
-    run_system_cmd(ctx->get_ptz_node()->get_move_stop().c_str());
-
+    DEBUG_MSG("PTZ: %s (noop)\n", __FUNCTION__);
     return SOAP_OK;
 }
 
-int PTZBindingService::AbsoluteMove(_tptz__AbsoluteMove *req, _tptz__AbsoluteMoveResponse &res)
-{
-    float pan = 0.0f;
-    float tilt = 0.0f;
-
-    LOG_REQUEST("AbsoluteMove");
-
-    if (req->Position && req->Position->PanTilt) {
-        pan = req->Position->PanTilt->x * 90.0f;   // 예: 0.0 ~ 1.0 → 0~90도
-        tilt = req->Position->PanTilt->y * 180.0f;
-    }
-
-    char cmd[256];
-    // snprintf(cmd, sizeof(cmd), "curl -s http://127.0.0.1:7777/rotatePT/%.0f/%.0f", pan, tilt);
-    // system(cmd);
-    return SOAP_OK;
-}
-
-int PTZBindingService::GetConfigurations(
-    _tptz__GetConfigurations* req,
-    _tptz__GetConfigurationsResponse& res)
-{
-    UNUSED(req);
-    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-
-    tt__PTZConfiguration* cfg = soap_new_tt__PTZConfiguration(soap);
-    cfg->token = "PTZConfigToken";
-    cfg->Name = soap_strdup(soap, "DefaultPTZConfig");
-    cfg->NodeToken = "PTZNodeToken";
-    cfg->UseCount = 1;
-
-    res.PTZConfiguration.push_back(cfg);
-    return SOAP_OK;
-}
-
-int PTZBindingService::GetConfiguration(
-    _tptz__GetConfiguration* req,
-    _tptz__GetConfigurationResponse& res)
-{
-    DEBUG_MSG("PTZ: %s\n", __FUNCTION__);
-    UNUSED(req);
-
-    res.PTZConfiguration = soap_new_tt__PTZConfiguration(soap);
-    res.PTZConfiguration->token = "PTZConfigToken";
-    res.PTZConfiguration->Name = soap_strdup(soap, "DefaultPTZConfig");
-    res.PTZConfiguration->NodeToken = "PTZNodeToken";
-    res.PTZConfiguration->UseCount = 1;
-
-    return SOAP_OK;
-}
-
-int PTZBindingService::SetPreset(
-    _tptz__SetPreset* req,
-    _tptz__SetPresetResponse& res)
-{
-    LOG_REQUEST("SetPreset");
-
-    if (!req) {
-        std::cerr << "❌ SetPreset: req is null" << std::endl;
-        return SOAP_FAULT;
-    }
-
-    if (!req->ProfileToken.empty())
-        std::cout << "  ProfileToken: " << req->ProfileToken << std::endl;
-
-    if (req->PresetName)
-        std::cout << "  PresetName: " << *(req->PresetName) << std::endl;
-    else
-        std::cout << "  PresetName is null" << std::endl;
-
-    if (req->PresetToken)
-        std::cout << "  PresetToken: " << *(req->PresetToken) << std::endl;
-    else
-        std::cout << "  PresetToken is null" << std::endl;
-
-    // PresetToken 필수로 가정하고 파일 저장
-    if (req->PresetToken) {
-        std::string filename = "/tmp/preset_" + *(req->PresetToken) + ".txt";
-        std::ofstream file(filename);
-        if (file.is_open()) {
-            file << "PresetToken=" << *(req->PresetToken) << "\n";
-            if (req->PresetName)
-                file << "PresetName=" << *(req->PresetName) << "\n";
-            file.close();
-            std::cout << "  ✅ Preset saved to " << filename << std::endl;
-        } else {
-            std::cerr << "  ❌ Failed to write to " << filename << std::endl;
-            return SOAP_FAULT;
-        }
-
-        // 응답용 PresetToken 설정
-        res.PresetToken = soap_strdup(soap, req->PresetToken->c_str());
-    } else {
-        std::cerr << "  ❌ PresetToken is required to save preset" << std::endl;
-        return SOAP_FAULT;
-    }
-
-    return SOAP_OK;
-}
-
-#include <fstream>  // 꼭 포함되어야 합니다
-
-int PTZBindingService::SetHomePosition(
-    _tptz__SetHomePosition* req,
-    _tptz__SetHomePositionResponse& res)
-{
-    LOG_REQUEST("SetHomePosition");
-
-    // 입력 로그 출력
-    if (req && !req->ProfileToken.empty())
-        std::cout << "  ProfileToken: " << req->ProfileToken << std::endl;
-    else
-        std::cout << "  ProfileToken is missing" << std::endl;
-
-    // 예제 저장: 단순히 파일 생성
-    const std::string filename = "/tmp/ptz_home.txt";
-    std::ofstream file(filename);
-    if (file.is_open()) {
-        file << "HomePreset=1" << std::endl;  // 임시 값. 실제 포지션 정보를 저장하려면 AbsoluteMove와 연동 필요
-        file.close();
-        std::cout << "  ✅ Home position saved to " << filename << std::endl;
-    } else {
-        std::cerr << "  ❌ Failed to write to " << filename << std::endl;
-        return SOAP_FAULT;
-    }
-
-    return SOAP_OK;
-}
-
+// ===== 나머지 비워두는 핸들러 =====
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetServiceCapabilities)
-// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurations)
-// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetPreset)
-SOAP_EMPTY_HANDLER(PTZBindingService, tptz, RemovePreset)
+SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurations)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetStatus)
-// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfiguration)
+SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetConfiguration)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetConfigurationOptions)
-// SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetHomePosition)
+SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SetHomePosition)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, SendAuxiliaryCommand)
-//SOAP_EMPTY_HANDLER(PTZBindingService, tptz, AbsoluteMove)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTours)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTour)
 SOAP_EMPTY_HANDLER(PTZBindingService, tptz, GetPresetTourOptions)
